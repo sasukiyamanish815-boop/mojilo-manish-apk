@@ -11,42 +11,136 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # 1. GitHub repository checkout
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Extract project ZIP
+      # 2. Find and extract ZIP
+      - name: Extract Android project
+        shell: bash
         run: |
-          mkdir project
-          unzip -q mojilo-manish-github-apk-build.zip -d project
-          echo "Project files:"
-          ls -la project
+          set -e
 
+          mkdir -p project
+
+          ZIP_FILE=$(find . -maxdepth 2 -type f -name "*.zip" \
+            ! -path "./.git/*" \
+            -print -quit)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: ZIP file not found"
+            exit 1
+          fi
+
+          echo "Using ZIP: $ZIP_FILE"
+
+          unzip -q "$ZIP_FILE" -d project
+
+          echo "Extracted files:"
+          find project -maxdepth 4 -type f | head -200
+
+      # 3. Find actual Android project folder
+      - name: Locate Android project
+        id: android_project
+        shell: bash
+        run: |
+          set -e
+
+          GRADLEW=$(find project -type f -name "gradlew" \
+            ! -path "*/.gradle/*" \
+            -print -quit)
+
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: gradlew not found"
+            find project -maxdepth 6 -type f | head -300
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$GRADLEW")
+
+          echo "Android project found at:"
+          echo "$PROJECT_DIR"
+
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      # 4. Setup Java 17
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
+      # 5. Setup Android SDK
+      - name: Setup Android
         uses: android-actions/setup-android@v3
 
+      # 6. Setup Gradle
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
 
+      # 7. Automatically fix fillMaxWidth import
+      - name: Fix fillMaxWidth import
+        working-directory: ${{ steps.android_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+
+          FILE=$(find . -type f -name "MainActivity.kt" \
+            -not -path "*/build/*" \
+            -print -quit)
+
+          if [ -z "$FILE" ]; then
+            echo "ERROR: MainActivity.kt not found"
+            find . -type f -name "*.kt" | head -100
+            exit 1
+          fi
+
+          echo "MainActivity found:"
+          echo "$FILE"
+
+          if grep -q "import androidx.compose.foundation.layout.fillMaxWidth" "$FILE"; then
+            echo "fillMaxWidth import already exists"
+          else
+            echo "Adding fillMaxWidth import..."
+
+            sed -i \
+              '/^package /a import androidx.compose.foundation.layout.fillMaxWidth' \
+              "$FILE"
+          fi
+
+          echo "Checking fillMaxWidth:"
+          grep -n "fillMaxWidth" "$FILE" || true
+
+      # 8. Build APK
       - name: Build Debug APK
-        working-directory: project
+        working-directory: ${{ steps.android_project.outputs.project_dir }}
+        shell: bash
         run: |
-          gradle assembleDebug --stacktrace
+          set -e
 
+          chmod +x gradlew
+
+          ./gradlew assembleDebug --stacktrace
+
+      # 9. Find generated APK
       - name: Find APK
+        shell: bash
         run: |
-          find project -type f -name "*.apk" -print
+          echo "Searching for APK..."
 
+          find "${{ steps.android_project.outputs.project_dir }}" \
+            -type f \
+            -name "*.apk" \
+            -print
+
+      # 10. Upload APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: mojilo-manish-apk
-          path: project/app/build/outputs/apk/debug/*.apk
+          path: |
+            ${{ steps.android_project.outputs.project_dir }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
